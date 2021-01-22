@@ -21,15 +21,20 @@
 #include "read.h"
 #include "vstring.h"
 
+#include "entry.h"
+#include "gnu_regex/regex.h"
+
 /*
 *   DATA DEFINITIONS
 */
 typedef enum {
-	K_FUNCTION
+	K_FUNCTION,
+	K_CLASS
 } luaKind;
 
 static kindOption LuaKinds [] = {
-	{ TRUE, 'f', "function", "functions" }
+	{ TRUE, 'f', "function", "functions" },
+	{ TRUE, 'c', "class", "classes" }
 };
 
 /*
@@ -89,18 +94,93 @@ static void extract_name (const char *begin, const char *end, vString *name)
 	}
 }
 
+static void extract_lplus_class_name(const char* class_name)
+{
+	// printf("extract %s\n", class_name);
+	tagEntryInfo e;
+
+	initTagEntry(&e, class_name);
+
+	e.lineNumber = getSourceLineNumber();
+	e.filePosition = getInputFilePosition();
+	e.isFileScope = true;
+	e.kindName = LuaKinds[K_CLASS].name;
+	e.kind = LuaKinds[K_CLASS].letter;
+
+	makeTagEntry(&e);
+}
+
+static void extract_lplus_function_name(const char* class_name, const char* function_name)
+{
+	// printf( "extract %s %s\n", class_name, function_name );
+	tagEntryInfo e;
+
+	initTagEntry(&e, function_name);
+
+	e.lineNumber = getSourceLineNumber();
+	e.filePosition = getInputFilePosition();
+	//e.isFileScope = true;
+	e.kindName = LuaKinds[K_FUNCTION].name;
+	e.kind = LuaKinds[K_FUNCTION].letter;
+
+	e.extensionFields.scope[0] = "class";
+	e.extensionFields.scope[1] = class_name;
+
+	makeTagEntry(&e);
+}
+
 static void findLuaTags (void)
 {
 	vString *name = vStringNew ();
 	const unsigned char *line;
 
+	const char* class_pattern = "Lplus\\.(Class|Extend)\\(.*\"(\\w+)\".*\\)";
+	const char* function_pattern = "def\\.(final|method|virtual|override|static)\\([^\\)]*\\).(\\w+)\\s*=\\s*function\\s*\\(";
+	int status = 0;
+
+	regex_t re_class;
+	regex_t re_function;
+
+	if (regcomp(&re_class, class_pattern, REG_EXTENDED) != 0 
+		|| regcomp(&re_function, function_pattern, REG_EXTENDED) != 0) {
+		return;
+	}
+
+	vString* lplusClassName = NULL;
 	while ((line = fileReadLine ()) != NULL)
 	{
 		const char *p, *q;
 
 		if (! is_a_code_line (line))
 			continue;
+		
+		// Lplus class
+		regmatch_t pmatch[3];
+		status = regexec(&re_class, (const char*)line, 3, pmatch, 0);
+		if (status == 0)
+		{
+			lplusClassName = vStringNew();
+			vStringNCopyS(lplusClassName, line + pmatch[2].rm_so, pmatch[2].rm_eo - pmatch[2].rm_so);
+			extract_lplus_class_name(vStringValue(lplusClassName));
+			// printf( "Catch class: %s\n", vStringValue(lplusClassName) );
+			continue;
+		}
 
+
+		// Lplus function
+		
+		status = regexec(&re_function, (const char*)line, 3, pmatch, 0);
+		if (status == 0 && lplusClassName != NULL)
+		{
+			vString* tmp = vStringNew();
+			vStringNCopyS(tmp, line + pmatch[2].rm_so, pmatch[2].rm_eo - pmatch[2].rm_so);
+			extract_lplus_function_name(vStringValue(lplusClassName), vStringValue(tmp));
+			vStringDelete(tmp);
+			continue;
+		}
+
+		//printf( "Catch!!!!!\n" );
+		
 		p = (const char*) strstr ((const char*) line, "function");
 		if (p == NULL)
 			continue;
@@ -117,6 +197,9 @@ static void findLuaTags (void)
 		}
 	}
 	vStringDelete (name);
+	vStringDelete(lplusClassName);
+
+	regfree(&re_function);
 }
 
 extern parserDefinition* LuaParser (void)
